@@ -36,7 +36,60 @@ The following models are confirmed to work with direct EC fan control via ports 
 - ThinkPad P-series (with exceptions noted below)
 
 **This project's target**: ThinkPad T480 -- uses standard ACPI EC at 0x62/0x66, confirmed
-compatible with TPFanCtrl/TPFanCtrl2.
+compatible with TPFanCtrl/TPFanCtrl2. See detailed test results below.
+
+## Verified Test Results: ThinkPad T480
+
+**Model**: ThinkPad T480, dual-fan, discrete NVIDIA MX150 GPU (Optimus)
+
+Tested with reTPFC Phase 2 (read sensors, read RPM, read/write fan control register).
+
+### Temperature Sensors
+
+| Index | Offset | Name | Result | Notes |
+|-------|--------|------|--------|-------|
+| 0 | 0x78 | cpu | ~80C | Active, reliable. Noise-rejected reads consistent |
+| 1 | 0x79 | aps | ~62C | Active, reliable |
+| 2 | 0x7A | crd | -- | Returns valid bytes but fails noise rejection |
+| 3 | 0x7B | gpu | 1C | dGPU powered off (Optimus). Returns 0x01, filtered by TEMP_MIN=10. Expected to read correctly when dGPU is active |
+| 4 | 0x7C | bat | -- | Inconsistent reads |
+| 5 | 0x7D | x7d | -- | Inactive |
+| 6 | 0x7E | bat | -- | Inconsistent reads |
+| 7 | 0x7F | x7f | -- | Inactive |
+| 8 | 0xC0 | bus | -- | Not a thermal register on T480 |
+| 9 | 0xC1 | pci | -- | Not a thermal register on T480 |
+| 10 | 0xC2 | pwr | FAIL | Always fails to read (IBF timeout). Register 0xC2 does not respond on this model |
+| 11 | 0xC3 | xc3 | -- | Not a thermal register on T480 |
+
+**Key finding**: Registers 0xC0-0xC3 are NOT thermal sensors on the T480. They appear to be
+repurposed in the newer EC firmware used by 8th-gen ThinkPads. Only the 0x78-0x7F group
+contains thermal data, and only 2-3 sensors are typically active (CPU, APS, GPU when dGPU
+is powered on).
+
+### Fan RPM
+
+- Registers 0x84/0x85 respond correctly
+- The tachometer sometimes returns 0xFFFF, which is rejected as an error code
+- RPM reading uses 3 retries to handle transient failures
+
+### Fan Control Register (0x2F)
+
+- Reads correctly. Observed 0x70 (manual level 7, leftover from TPFanCtrl2 session)
+- BIOS mode write (0x80) works
+- Manual level write works
+
+### Dual-Fan Detection
+
+- Writing 0x01 to fan selector register 0x31 and reading it back confirms Fan 2 present
+- Dual-fan protocol (select fan, write level, verify) works
+
+### Summary
+
+The T480 works well with the standard ACPI EC protocol. The main considerations are:
+- Only 2-3 thermal sensors are reliably active
+- The extended sensor group (0xC0-0xC3) should be treated as inactive on this model
+- GPU sensor returns a garbage value (0x01) when the dGPU is powered off via Optimus
+- RPM tachometer can return 0xFFFF error codes, requiring retry logic
 
 ## Known Incompatible Models
 
