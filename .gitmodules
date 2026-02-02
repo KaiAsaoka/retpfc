@@ -1,0 +1,3 @@
+[submodule "thirdparty/PawnIOLib"]
+	path = thirdparty/PawnIOLib
+	url = https://github.com/namazso/PawnIOLib.git

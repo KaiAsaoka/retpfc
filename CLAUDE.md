@@ -5,35 +5,49 @@ Controls ThinkPad fan speed by directly accessing the Embedded Controller (EC) v
 
 ## Build
 
-- **Language**: C++17 (MSVC / Visual Studio 2022)
+- **Language**: C++17
 - **Build system**: CMake
+- **Toolchains tested**: MSYS2 UCRT64 (GCC 13+), MSVC / Visual Studio 2022
 - **Target platform**: Windows x86/x64
 - **Port I/O driver**: PawnIO (signed kernel driver with sandboxed Pawn bytecode modules)
 - **Requires**: Administrator privileges (for EC port access), PawnIO driver installed
 
-```
+```bash
+# MinGW (MSYS2 UCRT64)
+cmake -B build -G "MinGW Makefiles"
+cmake --build build
+
+# Visual Studio 2022
 cmake -B build -G "Visual Studio 17 2022"
 cmake --build build --config Release
+
+# Mock EC (no hardware required — simulates sensor data)
+cmake -B build -G "MinGW Makefiles" -DRETPFC_MOCK_EC=ON
+cmake --build build
 ```
 
 ## Project Structure
 
 ```
 src/
-  main.cpp                  Entry point, service/GUI dispatch
+  main.cpp                  Entry point, EC demo + safety handlers
   config/
     config.h / config.cpp   INI config parsing, fan curve definitions
   ec/
-    ec_access.h / .cpp      High-level EC read/write (temperatures, fan level)
-    port_io.h / .cpp         Low-level I/O port protocol (EC command handshake)
-  fan/
-    fan_controller.h / .cpp  Fan control logic, mode state machine, safety checks
-  ui/
-    tray_icon.h / .cpp       System tray icon (color + text modes)
+    ec_access.h / .cpp      EC register constants, read/write protocol, fan control
+    port_io.h / .cpp        PawnIO wrapper (RAII), mock EC implementation
+  fan/                      (Phase 3 — not yet implemented)
+    fan_controller.h / .cpp Fan control logic, mode state machine, safety checks
+  ui/                       (Phase 4-5 — not yet implemented)
+    tray_icon.h / .cpp      System tray icon (color + text modes)
     settings_dialog.h / .cpp Main settings window
+thirdparty/
+  PawnIOLib/                Git submodule — PawnIO usermode library
 resources/
-  icons/                     Tray icons (color-coded by temperature)
-  app.rc                     Win32 resource file (dialogs, menus, icons)
+  icons/                    Tray icons (color-coded by temperature)
+  app.rc                    Win32 resource file (dialogs, menus, icons)
+LpcACPIEC.bin               PawnIO module for EC port access (not in git)
+TPFanControl.ini            Config file (in executable directory)
 ```
 
 ## Architecture
@@ -110,7 +124,8 @@ a separate communication channel and is not needed for fan control. All ThinkPad
 | 10 | 0xC2 | pwr | Power supply |
 | 11 | 0xC3 | xc3 | Usually N/A |
 
-Sensor values of 0x00 or 0x80 are invalid. Values > 127 are rejected.
+Sensor values of 0x00 or 0x80 are invalid. Values < 10 or > 127 are rejected (filters ghost
+sensors returning implausible values like 1C).
 
 ### Fan Control Modes
 
@@ -136,8 +151,10 @@ Sensor values of 0x00 or 0x80 are invalid. Values > 127 are rejected.
 - On lid close (`GUID_LIDSWITCH_STATE_CHANGE`): switch to BIOS mode, restore on open.
 - After `MaxReadErrors` consecutive EC read failures (default 10): revert to BIOS mode.
 - Manual mode must auto-exit to Smart mode when any sensor exceeds `ManModeExit`.
-- EC reads require two consecutive matching samples to accept (noise rejection).
+- EC reads require two consecutive reads within 2 degrees to accept (noise rejection). Exact match is too strict for actively-updating sensors.
 - All EC access serialized with a mutex. Named mutex `Access_EC` for cross-process sync (per PawnIO LpcACPIEC convention).
+- Fan RPM value 0xFFFF is rejected as a tachometer error code.
+- A 1ms settle delay after each EC read prevents bus contention with the ACPI driver.
 
 ## Config File Format (INI)
 
@@ -193,12 +210,16 @@ HK_Manual=3 M         # Ctrl+Shift+M → Manual mode
 
 ## Development Phases
 
-1. **Console config reader** — Parse INI, print fan curve. Learn: file I/O, structs, vectors, string parsing.
-2. **EC access library** — Load PawnIO + LpcACPIEC module, read temps/fan RPM, print to console. Learn: PawnIOLib API, bitwise ops, hardware protocols.
+1. **Console config reader** — Parse INI, print fan curve. **Complete.**
+2. **EC access library** — Load PawnIO + LpcACPIEC module, read temps/fan RPM, print to console. **Complete.** Verified on T480 hardware.
 3. **Fan controller (console)** — Poll + apply fan curve + write fan levels. Learn: std::thread, std::mutex, chrono, state machines.
 4. **System tray icon** — Hidden window + tray icon with context menu. Learn: Win32 WNDCLASS, message loops, Shell_NotifyIcon.
 5. **Settings dialog** — Temperature display, mode selection, status log. Learn: Win32 dialogs, timer-driven updates.
 6. **Polish** — Windows service support, lid detection, hotkeys, installer.
+
+## Teaching Style
+
+- When explaining C++ concepts, always include Python comparisons to help bridge understanding.
 
 ## Conventions
 
@@ -209,6 +230,26 @@ HK_Manual=3 M         # Ctrl+Shift+M → Manual mode
 - Prefer `uint8_t`/`uint16_t` for hardware register values.
 - Named constants over magic numbers. Every EC offset and command has a named constant.
 - All public functions, structs, enums, and struct members must have Doxygen docstrings using `@`-style tags (`@brief`, `@param`, `@return`). Static helper functions in `.cpp` files should also be documented. See `docs/code-style.md` for the full style guide.
+
+## Mock EC
+
+Build with `-DRETPFC_MOCK_EC=ON` for development without hardware. The mock implements a
+full EC state machine at the port level: it tracks IBF/OBF status flags and responds to the
+read/write command handshake, returning simulated register values (temperatures ~55-65C,
+RPM ~2500). This exercises the real EC protocol code in `ec_access.cpp`.
+
+## Test System
+
+**ThinkPad T480** — dual-fan model with discrete NVIDIA MX150 GPU.
+
+Hardware test results:
+- **Active sensors**: CPU (0x78) ~80C, APS (0x79) ~62C
+- **GPU sensor** (0x7B): Returns 0x01 when dGPU is powered off (NVIDIA Optimus). Filtered by TEMP_MIN=10
+- **Sensors 0x7A, 0x7C-0x7F**: Return valid-looking values but may be inactive on some configs
+- **Extended sensors** (0xC0-0xC3): Not thermal registers on T480. Register 0xC2 consistently fails to read (IBF timeout). These offsets are repurposed in newer EC firmware
+- **Fan RPM** (0x84-0x85): Tachometer returns 0xFFFF when fan is at certain speeds. Rejected as error code
+- **Fan control** (0x2F): Reads/writes work. Bit 7 = BIOS mode. Bits 0-6 = manual level
+- **Dual-fan detection**: Fan selector register 0x31 responds correctly (write 0x01, readback confirms 0x01)
 
 ## Dependencies
 
