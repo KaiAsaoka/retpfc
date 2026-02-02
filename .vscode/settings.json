@@ -1,0 +1,12 @@
+{
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "cmake.configureOnOpen": true,
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "cmake.debugConfig": {
+        "cwd": "${workspaceFolder}"
+    },
+    "cmake.launchBehavior": "reuseTerminal",
+    "cmake.environment": {
+        "working_directory": "${workspaceFolder}"
+    }
+}
