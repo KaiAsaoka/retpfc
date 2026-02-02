@@ -89,48 +89,49 @@ DEFINE_IOCTL_SIZED(ioctl_pio_write, 2, 0) {
 ## Integration With port_io.cpp
 
 The EC handshake protocol (wait for IBF clear, send command, wait for OBF, read result)
-is implemented in usermode C++. PawnIO only provides the raw port read/write. Usage:
+is implemented in usermode C++. PawnIO only provides the raw port read/write.
+
+PawnIOLib is compiled directly into the executable (not built as a separate DLL). The
+`PawnIOLib_EXPORTS` define is set so PawnIOLib's functions are not decorated with
+`__declspec(dllimport)`. PawnIOLib links against `ntdll.lib` for NT native API calls
+(`NtOpenFile`, `NtDeviceIoControlFile`).
+
+The actual implementation in `src/ec/port_io.cpp` uses `std::optional` for error handling
+and RAII for resource management:
 
 ```cpp
-#include <PawnIOLib.h>
+// Simplified — see src/ec/port_io.cpp for the full implementation
+std::optional<uint8_t> PortIO::inb(uint16_t port) {
+    if (!open_) return std::nullopt;
+    ULONG64 in_params[] = { port };
+    ULONG64 out_params[1] = {};
+    SIZE_T return_size = 0;
+    HRESULT hr = pawnio_execute(
+        static_cast<HANDLE>(handle_), "ioctl_pio_read",
+        in_params, 1, out_params, 1, &return_size);
+    if (FAILED(hr)) return std::nullopt;
+    return static_cast<uint8_t>(out_params[0]);
+}
 
-class PortIO {
-    HANDLE hPawnIO = nullptr;
-
-public:
-    bool init() {
-        if (FAILED(pawnio_open(&hPawnIO)))
-            return false;
-        auto binary = read_file("LpcACPIEC.bin");
-        return SUCCEEDED(pawnio_load(hPawnIO, binary.data(), binary.size()));
-    }
-
-    uint8_t inb(uint16_t port) {
-        ULONG64 in_params[] = { port };
-        ULONG64 out_params[1] = {};
-        ULONG out_size = 0;
-        pawnio_execute(hPawnIO, "ioctl_pio_read",
-                       in_params, 1, out_params, 1, &out_size);
-        return static_cast<uint8_t>(out_params[0]);
-    }
-
-    void outb(uint16_t port, uint8_t value) {
-        ULONG64 in_params[] = { port, value };
-        pawnio_execute(hPawnIO, "ioctl_pio_write",
-                       in_params, 2, nullptr, 0, nullptr);
-    }
-
-    void close() {
-        if (hPawnIO) {
-            pawnio_close(hPawnIO);
-            hPawnIO = nullptr;
-        }
-    }
-};
+bool PortIO::outb(uint16_t port, uint8_t value) {
+    if (!open_) return false;
+    ULONG64 in_params[] = { port, value };
+    HRESULT hr = pawnio_execute(
+        static_cast<HANDLE>(handle_), "ioctl_pio_write",
+        in_params, 2, nullptr, 0, nullptr);
+    return SUCCEEDED(hr);
+}
 ```
 
+The `init()` method opens the PawnIO driver handle, reads the `LpcACPIEC.bin` module from
+disk, and loads it via `pawnio_load()`. The destructor calls `shutdown()` which closes the
+handle via `pawnio_close()`.
+
+A mock implementation (`#ifdef RETPFC_MOCK_EC`) simulates the full EC state machine at the
+port level, allowing development without hardware.
+
 The rest of the EC protocol (reading temperatures, writing fan levels, dual-fan sequencing)
-is built on top of `inb`/`outb` exactly as described in CLAUDE.md.
+is built on top of `inb`/`outb` in `src/ec/ec_access.cpp`.
 
 ## Comparison With WinRing0 Approach
 
@@ -146,10 +147,11 @@ is built on top of `inb`/`outb` exactly as described in CLAUDE.md.
 
 ## Build Requirements
 
-- PawnIOLib headers and library (from https://github.com/namazso/PawnIOLib)
-- CMakeLists.txt must link against PawnIOLib
-- The compiled `LpcACPIEC.bin` module must be distributed alongside the executable
-  (signed builds available from PawnIO.Modules releases)
+- PawnIOLib source (added as git submodule at `thirdparty/PawnIOLib/`)
+- PawnIOLib is compiled directly into the executable (define `PawnIOLib_EXPORTS`)
+- Must link against `ntdll.lib` (PawnIOLib uses NT native APIs)
+- The compiled `LpcACPIEC.bin` module must be placed in the working directory alongside
+  the executable (signed builds available from PawnIO.Modules v0.2.2+ releases)
 
 ## User Requirements
 

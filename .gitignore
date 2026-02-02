@@ -1,3 +1,7 @@
 build/
 plan.md
 .claude/
+learnings/
+
+# PawnIO module binary (download from PawnIO.Modules releases)
+LpcACPIEC.bin
